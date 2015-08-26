@@ -16,7 +16,7 @@ class Parser
      * 
      * @var string
      */
-    private $_commonWhiteList = 'kbd|b|i|strong|em|sup|sub|br|code|del|a|hr';
+    private $_commonWhiteList = 'kbd|b|i|strong|em|sup|sub|br|code|del|a|hr|small';
 
     /**
      * _specialWhiteList 
@@ -47,7 +47,7 @@ class Parser
      * 
      * @var string
      */
-    private $_current = '';
+    private $_current = 'normal';
 
     /**
      * _pos  
@@ -64,16 +64,32 @@ class Parser
     private $_definitions = [];
 
     /**
-     * _parseDefinition  
-     * 
-     * @var bool
+     * @var array
      */
-    private $_parseDefinition = true;
+    private $_hooks = [];
 
     /**
      * @var array
      */
-    private $_hooks = [];
+    private $_holders = [];
+
+    /**
+     * @var string
+     */
+    private $_uniqid = '';
+
+    /**
+     * @var int
+     */
+    private $_id = 0;
+
+    /**
+     * init uniqid
+     */
+    public function __construct()
+    {
+        $this->_uniqid = md5(uniqid());
+    }
 
     /**
      * makeHtml  
@@ -83,6 +99,7 @@ class Parser
      */
     public function makeHtml($text)
     {
+        $text = $this->initText($text);
         $html = $this->parse($text);
         return $this->makeFootnotes($html);
     }
@@ -94,6 +111,29 @@ class Parser
     public function hook($type, $callback)
     {
         $this->_hooks[$type][] = $callback;
+    }
+
+    /**
+     * @param $str
+     * @return string
+     */
+    public function makeHolder($str)
+    {
+        $key = '|' . $this->_uniqid . $this->_id . '|';
+        $this->_id ++;
+        $this->_holders[$key] = $str;
+
+        return $key;
+    }
+
+    /**
+     * @param $text
+     * @return mixed
+     */
+    private function initText($text)
+    {
+        $text = str_replace(["\t", "\r"], ['    ', ''], $text);
+        return $text;
     }
 
     /**
@@ -115,7 +155,6 @@ class Parser
                 }
 
                 $html .= "<li id=\"fn-{$index}\">{$val}</li>";
-
                 $index ++;
             }
 
@@ -133,8 +172,7 @@ class Parser
      */
     private function parse($text)
     {
-        $blocks = $this->parseBlock($text, $lines, $this->_parseDefinition);
-        $this->_parseDefinition = false; 
+        $blocks = $this->parseBlock($text, $lines);
         $html = '';
 
         foreach ($blocks as $block) {
@@ -175,6 +213,18 @@ class Parser
     }
 
     /**
+     * @param $text
+     * @return string
+     */
+    private function releaseHolder($text)
+    {
+        $text = str_replace(array_keys($this->_holders), array_values($this->_holders), $text);
+        $this->_holders = [];
+
+        return $text;
+    }
+
+    /**
      * parseInline 
      * 
      * @param string $text 
@@ -183,35 +233,23 @@ class Parser
      */
     private function parseInline($text, $whiteList = '')
     {
-        $id = 0;
-        $uniqid = md5(uniqid());
-        $codes = [];
-
         $text = $this->call('beforeParseInline', $text);
 
         // code
-        $text = preg_replace_callback("/`(.+?)`/", function ($matches) use (&$id, &$codes, $uniqid) {
-            $key = '|' . $uniqid . $id . '|';
-            $codes[$key] = '<code>' . htmlspecialchars($matches[1]) . '</code>';
-            $id ++;
-
-            return $key;
+        $text = preg_replace_callback("/(^|[^\\\])(`+)(.+?)\\2/", function ($matches) {
+            return $matches[1] . $this->makeHolder('<code>' . htmlspecialchars($matches[3]) . '</code>');
         }, $text);
 
-        // escape
+        // encode unsafe tags
         $text = preg_replace_callback("/<(\/?)([a-z0-9-]+)(\s+[^>]*)?>/i", function ($matches) use ($whiteList) {
             if (stripos($this->_commonWhiteList . '|' . $whiteList, $matches[2]) !== false) {
-                return $matches[0];
+                return $this->makeHolder($matches[0]);
             } else {
                 return htmlspecialchars($matches[0]);
             }
         }, $text);
 
-        // strong and em and some fuck
-        $text = preg_replace("/(_|\*){3}(.+?)\\1{3}/", "<strong><em>\\2</em></strong>", $text);
-        $text = preg_replace("/(_|\*){2}(.+?)\\1{2}/", "<strong>\\2</strong>", $text);
-        $text = preg_replace("/(_|\*)(.+?)\\1/", "<em>\\2</em>", $text);
-        $text = preg_replace("/<(https?:\/\/.+)>/i", "<a href=\"\\1\">\\1</a>", $text);
+        $text = str_replace(['<', '>'], ['&lt;', '&gt;'], $text);
 
         // footnote
         $text = preg_replace_callback("/\[\^((?:[^\]]|\\]|\\[)+?)\]/", function ($matches) {
@@ -222,48 +260,62 @@ class Parser
                 $this->_footnotes[$id] = $matches[1];
             }
 
-            return "<sup id=\"fnref-{$id}\"><a href=\"#fn-{$id}\" class=\"footnote-ref\">{$id}</a></sup>";
+            return $this->makeHolder("<sup id=\"fnref-{$id}\"><a href=\"#fn-{$id}\" class=\"footnote-ref\">{$id}</a></sup>");
         }, $text);
 
         // image
-        $text = preg_replace_callback("/!\[((?:[^\]]|\\]|\\[)+?)\]\(([^\)]+)\)/", function ($matches) {
-            $escaped = str_replace(['\[', '\]'], ['[', ']'], $matches[1]);
-            return "<img src=\"{$matches[2]}\" alt=\"{$escaped}\" title=\"{$escaped}\">";
+        $text = preg_replace_callback("/!\[((?:[^\]]|\\]|\\[)*?)\]\(((?:[^\)]|\\)|\\()+?)\)/", function ($matches) {
+            $escaped = $this->escapeBracket($matches[1]);
+            $url = $this->escapeBracket($matches[2]);
+            return $this->makeHolder("<img src=\"{$url}\" alt=\"{$escaped}\" title=\"{$escaped}\">");
         }, $text);
 
-        $text = preg_replace_callback("/!\[((?:[^\]]|\\]|\\[)+?)\]\[((?:[^\]]|\\]|\\[)+)\]/", function ($matches) {
-            $escaped = str_replace(['\[', '\]'], ['[', ']'], $matches[1]);
-            
-            if (isset($this->_definitions[$matches[2]])) {
-                return "<img src=\"{$this->_definitions[$matches[2]]}\" alt=\"{$escaped}\" title=\"{$escaped}\">";
-            } else {
-                return $escaped;
-            }
+        $text = preg_replace_callback("/!\[((?:[^\]]|\\]|\\[)*?)\]\[((?:[^\]]|\\]|\\[)+?)\]/", function ($matches) {
+            $escaped = $this->escapeBracket($matches[1]);
+
+            $result = isset($this->_definitions[$matches[2]]) ?
+                "<img src=\"{$this->_definitions[$matches[2]]}\" alt=\"{$escaped}\" title=\"{$escaped}\">"
+                : $escaped;
+
+            return $this->makeHolder($result);
         }, $text);
 
         // link
-        $text = preg_replace_callback("/\[((?:[^\]]|\\]|\\[)+?)\]\(([^\)]+)\)/", function ($matches) {
-            $escaped = str_replace(['\[', '\]'], ['[', ']'], $matches[1]);
-            return "<a href=\"{$matches[2]}\">{$escaped}</a>";
+        $text = preg_replace_callback("/\[((?:[^\]]|\\]|\\[)+?)\]\(((?:[^\)]|\\)|\\()+?)\)/", function ($matches) {
+            $escaped = $this->escapeBracket($matches[1]);
+            $url = $this->escapeBracket($matches[2]);
+            return $this->makeHolder("<a href=\"{$url}\">{$escaped}</a>");
         }, $text); 
 
-        $text = preg_replace_callback("/\[((?:[^\]]|\\]|\\[)+?)\]\[((?:[^\]]|\\]|\\[)+)\]/", function ($matches) {
-            $escaped = str_replace(['\[', '\]'], ['[', ']'], $matches[1]);
+        $text = preg_replace_callback("/\[((?:[^\]]|\\]|\\[)+?)\]\[((?:[^\]]|\\]|\\[)+?)\]/", function ($matches) {
+            $escaped = $this->escapeBracket($matches[1]);
             
-            if (isset($this->_definitions[$matches[2]])) {
-                return "<a href=\"{$this->_definitions[$matches[2]]}\">{$escaped}</a>";
-            } else {
-                return $escaped;
-            }
-        }, $text); 
+            $result = isset($this->_definitions[$matches[2]]) ?
+                "<a href=\"{$this->_definitions[$matches[2]]}\">{$escaped}</a>"
+                : $escaped;
+
+            return $this->makeHolder($result);
+        }, $text);
+
+        // escape
+        $text = preg_replace_callback("/\\\(`|\*|_)/", function ($matches) {
+            return $this->makeHolder(htmlspecialchars($matches[1]));
+        }, $text);
+
+        // strong and em and some fuck
+        $text = preg_replace("/(_|\*){3}(.+?)\\1{3}/", "<strong><em>\\2</em></strong>", $text);
+        $text = preg_replace("/(_|\*){2}(.+?)\\1{2}/", "<strong>\\2</strong>", $text);
+        $text = preg_replace("/(_|\*)(.+?)\\1/", "<em>\\2</em>", $text);
+        $text = preg_replace("/<(https?:\/\/.+)>/i", "<a href=\"\\1\">\\1</a>", $text);
 
         // autolink
-        $text = preg_replace("/(^|[^\"])((http|https|ftp|mailto):[_a-z0-9-\.\/%#@\?\+=~\|\,]+)($|[^\"])/i",
+        $text = preg_replace("/(^|[^\"])((http|https|ftp|mailto):[_a-z0-9-\.\/%#@\?\+=~\|\,&\(\)]+)($|[^\"])/i",
             "\\1<a href=\"\\2\">\\2</a>\\4", $text);
 
-        // release
-        $text = str_replace(array_keys($codes), array_values($codes), $text);
+        $text = $this->call('afterParseInlineBeforeRelease', $text);
 
+        // release
+        $text = $this->releaseHolder($text);
         $text = $this->call('afterParseInline', $text);
 
         return $text;
@@ -274,16 +326,16 @@ class Parser
      * 
      * @param string $text 
      * @param array $lines
-     * @param bool $parseDefinition
      * @return array
      */
-    private function parseBlock($text, &$lines, $parseDefinition = true)
+    private function parseBlock($text, &$lines)
     {
         $lines = explode("\n", $text);
         $this->_blocks = [];
-        $this->_current = '';
+        $this->_current = 'normal';
         $this->_pos = -1;
         $special = implode("|", array_keys($this->_specialWhiteList));
+        $emptyCount = 0;
 
         // analyze by line
         foreach ($lines as $key => $line) {
@@ -295,7 +347,7 @@ class Parser
                 } else {
                     $this->startBlock('code', $key, $matches[2]);
                 }
-                
+
                 continue;
             } else if ($this->isBlock('code')) {
                 $this->setBlock($key);
@@ -326,8 +378,9 @@ class Parser
 
             switch (true) {
                 // list
-                case preg_match("/^(\s*)((?:[0-9a-z]\.?)|\-|\+|\*)\s+/", $line, $matches):
-                    $space = strlen($matches[1]) + strlen($matches[2]);
+                case preg_match("/^(\s*)((?:[0-9a-z]\.)|\-|\+|\*)\s+/", $line, $matches):
+                    $space = strlen($matches[1]);
+                    $emptyCount = 0;
 
                     // opened
                     if ($this->isBlock('list')) {
@@ -343,12 +396,67 @@ class Parser
                     $this->startBlock('footnote', $key, [$space, $matches[1]]);
                     break;
 
+                // definition
+                case preg_match("/^\s*\[((?:[^\]]|\\]|\\[)+?)\]:\s*(.+)$/", $line, $matches):
+                    $this->_definitions[$matches[1]] = $matches[2];
+                    $this->startBlock('definition', $key)
+                        ->endBlock();
+                    break;
+
                 // pre
                 case preg_match("/^ {4,}/", $line):
+                    $emptyCount = 0;
+
                     if ($this->isBlock('pre')) {
                         $this->setBlock($key);
                     } else if ($this->isBlock('normal')) {
                         $this->startBlock('pre', $key);
+                    }
+
+                    break;
+
+                // table
+                case preg_match("/^((?:(?:(?:[ :]*\-[ :]*)+(?:\||\+))|(?:(?:\||\+)(?:[ :]*\-[ :]*)+)|(?:(?:[ :]*\-[ :]*)+(?:\||\+)(?:[ :]*\-[ :]*)+))+)$/", $line, $matches):
+                    if ($this->isBlock('normal')) {
+                        $block = $this->getBlock();
+                        $head = false;
+
+                        if (empty($block) ||
+                            $block[0] != 'normal' ||
+                            preg_match("/^\s*$/", $lines[$block[2]])) {
+                            $this->startBlock('table', $key);
+                        } else {
+                            $head = true;
+                            $this->backBlock(1, 'table');
+                        }
+
+                        if ($matches[1][0] == '|') {
+                            $matches[1] = substr($matches[1], 1);
+
+                            if ($matches[1][strlen($matches[1]) - 1] == '|') {
+                                $matches[1] = substr($matches[1], 0, -1);
+                            }
+                        }
+
+                        $rows = preg_split("/(\+|\|)/", $matches[1]);
+                        $aligns = [];
+                        foreach ($rows as $row) {
+                            $align = 'none';
+
+                            if (preg_match("/^\s*(:?)\-+(:?)\s*$/", $row, $matches)) {
+                                if (!empty($matches[1]) && !empty($matches[2])) {
+                                    $align = 'center';
+                                } else if (!empty($matches[1])) {
+                                    $align = 'left';
+                                } else if (!empty($matches[2])) {
+                                    $align = 'right';
+                                }
+                            }
+
+                            $aligns[] = $align;
+                        }
+
+                        $this->setBlock($key, [$head, $aligns]);
                     }
                     break;
 
@@ -360,7 +468,8 @@ class Parser
                     break;
 
                 // multi heading
-                case preg_match("/^\s*((=|-){2,})\s*$/", $line, $matches):
+                case preg_match("/^\s*((=|-){2,})\s*$/", $line, $matches)
+                    && ($this->getBlock() && !preg_match("/^\s*$/", $lines[$this->getBlock()[2]])):    // check if last line isn't empty
                     if ($this->isBlock('normal')) {
                         $this->backBlock(1, 'mh', $matches[1][0] == '=' ? 1 : 2)
                             ->setBlock($key)
@@ -389,17 +498,43 @@ class Parser
                 default:
                     if ($this->isBlock('list')) {
                         preg_match("/^(\s*)/", $line, $matches);
-                        
-                        if (strlen($matches[1]) >= $this->getBlock()[3]) {
+
+                        if (strlen($line) == strlen($matches[1])) { // empty line
+                            if ($emptyCount > 0) {
+                                $this->startBlock('normal', $key);
+                            } else {
+                                $this->setBlock($key);
+                            }
+
+                            $emptyCount ++;
+                        } else if ($emptyCount == 0) {
                             $this->setBlock($key);
                         } else {
                             $this->startBlock('normal', $key);
                         }
                     } else if ($this->isBlock('footnote')) {
                         preg_match("/^(\s*)/", $line, $matches);
-                        
+
                         if (strlen($matches[1]) >= $this->getBlock()[3][0]) {
                             $this->setBlock($key);
+                        } else {
+                            $this->startBlock('normal', $key);
+                        }
+                    } else if ($this->isBlock('table')) {
+                        if (false !== strpos($line, '|')) {
+                            $this->setBlock($key);
+                        } else {
+                            $this->startBlock('normal', $key);
+                        }
+                    } else if ($this->isBlock('pre')) {
+                        if (preg_match("/^\s*$/", $line)) {
+                            if ($emptyCount > 0) {
+                                $this->startBlock('normal', $key);
+                            } else {
+                                $this->setBlock($key);
+                            }
+
+                            $emptyCount ++;
                         } else {
                             $this->startBlock('normal', $key);
                         }
@@ -416,33 +551,48 @@ class Parser
             }
         }
 
-        // check if last block is definition
-        $lastBlock = $this->getBlock();
-        if ($lastBlock[0] == 'normal' && $parseDefinition) {
-            $found = false;
-            $step = 0;
+        return $this->optimizeBlocks($this->_blocks, $lines);
+    }
 
-            for ($i = $lastBlock[2]; $i >= $lastBlock[1]; $i --) {
-                $line = $lines[$i];
-                $step ++;
+    /**
+     * @param array $blocks
+     * @param array $lines
+     * @return array
+     */
+    private function optimizeBlocks(array $blocks, array $lines)
+    {
+        $blocks = $this->call('beforeOptimizeBlocks', $blocks, $lines);
 
-                if (preg_match("/^\s*$/", $line)) {
-                    continue;
-                } else if (preg_match("/^\s*\[((?:[^\]]|\\]|\\[)+?)\]:\s*(.+)$/i", $line, $matches)) {
-                    $found = true;
-                    $this->_definitions[$matches[1]] = $matches[2];
-                } else {
-                    $step --;
-                    break;
+        foreach ($blocks as $key => &$block) {
+            $prevBlock = isset($blocks[$key - 1]) ? $blocks[$key - 1] : NULL;
+            $nextBlock = isset($blocks[$key + 1]) ? $blocks[$key + 1] : NULL;
+
+            list ($type, $from, $to) = $block;
+
+            if ('pre' == $type) {
+                $isEmpty = array_reduce($lines, function ($result, $line) {
+                    return preg_match("/^\s*$/", $line) && $result;
+                }, true);
+
+                if ($isEmpty) {
+                    $block[0] = $type = 'normal';
                 }
             }
 
-            if ($found) {
-                $this->backBlock($step, 'define');
+            if ('normal' == $type) {
+                // combine two splitted list
+                if ($from == $to && preg_match("/^\s*$/", $lines[$from])
+                    && !empty($prevBlock) && !empty($nextBlock)) {
+                    if ($prevBlock[0] == 'list' && $nextBlock[0] == 'list') {
+                        // combine 3 blocks
+                        $blocks[$key - 1] = ['list', $prevBlock[1], $nextBlock[2], NULL];
+                        array_splice($blocks, $key, 2);
+                    }
+                }
             }
         }
 
-        return $this->_blocks;
+        return $this->call('afterOptimizeBlocks', $blocks, $lines);
     }
 
     /**
@@ -456,8 +606,10 @@ class Parser
     {
         $lang = trim($lang);
         $lines = array_slice($lines, 1, -1);
+        $str = implode("\n", $lines);
 
-        return '<pre><code' . (!empty($lang) ? " class=\"{$lang}\"" : '') . '>'
+        return preg_match("/^\s*$/", $str) ? '' :
+            '<pre><code' . (!empty($lang) ? " class=\"{$lang}\"" : '') . '>'
             . htmlspecialchars(implode("\n", $lines)) . '</code></pre>';
     }
 
@@ -472,8 +624,9 @@ class Parser
         foreach ($lines as &$line) {
             $line = htmlspecialchars(substr($line, 4));
         }
+        $str = implode("\n", $lines);
 
-        return '<pre><code>' . implode("\n", $lines) . '</code></pre>';
+        return preg_match("/^\s*$/", $str) ? '' : '<pre><code>' . $str . '</code></pre>';
     }
 
     /**
@@ -486,7 +639,7 @@ class Parser
     private function parseSh(array $lines, $num)
     {
         $line = $this->parseInline(trim($lines[0], '# '));
-        return "<h{$num}>{$line}</h{$num}>";
+        return preg_match("/^\s*$/", $line) ? '' : "<h{$num}>{$line}</h{$num}>";
     }
 
     /**
@@ -499,7 +652,7 @@ class Parser
     private function parseMh(array $lines, $num)
     {
         $line = $this->parseInline(trim($lines[0], '# '));
-        return "<h{$num}>{$line}</h{$num}>";
+        return preg_match("/^\s*$/", $line) ? '' : "<h{$num}>{$line}</h{$num}>";
     }
 
     /**
@@ -513,8 +666,9 @@ class Parser
         foreach ($lines as &$line) {
             $line = preg_replace("/^> ?/", '', $line);
         }
+        $str = implode("\n", $lines);
 
-        return '<blockquote>' . $this->parse(implode("\n", $lines)) . '</blockquote>';
+        return preg_match("/^\s*$/", $str) ? '' : '<blockquote>' . $this->parse($str) . '</blockquote>';
     }
 
     /**
@@ -526,129 +680,148 @@ class Parser
     private function parseList(array $lines)
     {
         $html = '';
-        $levels = [];
-        $map = [];
-        $lastSpace = 0;
-        $uniqid = md5(uniqid());
+        $minSpace = 99999;
+        $rows = [];
 
         // count levels
-        foreach ($lines as $line) {
-            $count = 0;
-            $type = NULL;
-
+        foreach ($lines as $key => $line) {
             if (preg_match("/^(\s*)((?:[0-9a-z]\.?)|\-|\+|\*)(\s+)(.*)$/", $line, $matches)) {
-                $count = strlen($matches[1]);
-                $type = false !== strpos('-+*', $matches[2]) ? 'ul' : 'ol';
-                $line = $matches[4];
-                $lastSpace = strlen($matches[1] . $matches[2] . $matches[3]);
-            } else {
-                $line = substr($line, $lastSpace);
+                $space = strlen($matches[1]);
+                $type = false !== strpos('+-*', $matches[2]) ? 'ul' : 'ol';
+                $minSpace = min($space, $minSpace);
 
-                // attach to last map
-                $lastMapIndex = count($map) - 1;
-                if (is_array($map[$lastMapIndex][2])) {
-                    $map[$lastMapIndex][2][] = $line;
+                $rows[] = [$space, $type, $line, $matches[4]];
+            } else {
+                $rows[] = $line;
+            }
+        }
+
+        $found = false;
+        $secondMinSpace = 99999;
+        foreach ($rows as $row) {
+            if (is_array($row) && $row[0] != $minSpace) {
+                $secondMinSpace = min($secondMinSpace, $row[0]);
+                $found = true;
+            }
+        }
+        $secondMinSpace = $found ?: $minSpace;
+
+        $lastType = '';
+        $leftLines = [];
+
+        foreach ($rows as $row) {
+            if (is_array($row)) {
+                list ($space, $type, $line, $text) = $row;
+
+                if ($space != $minSpace) {
+                    $leftLines[] = preg_replace("/^\s{" . $secondMinSpace . "}/", '', $line);
                 } else {
-                    $map[$lastMapIndex][2] = [
-                        $map[$lastMapIndex][2],
-                        $line
-                    ];
+                    if ($lastType != $type) {
+                        if (!empty($lastType)) {
+                            $html .= "</{$lastType}>";
+                        }
+
+                        $html .= "<{$type}>";
+                    }
+
+                    if (!empty($leftLines)) {
+                        $html .= "<li>" . $this->parse(implode("\n", $leftLines)) . "</li>";
+                    }
+
+                    $leftLines = [$text];
+                    $lastType = $type;
                 }
-                
+            } else {
+                $leftLines[] = preg_replace("/^\s{" . $secondMinSpace . "}/", '', $row);
+            }
+        }
+
+        if (!empty($leftLines)) {
+            $html .= "<li>" . $this->parse(implode("\n", $leftLines)) . "</li></{$lastType}>";
+        }
+
+        return $html;
+    }
+
+    /**
+     * @param array $lines
+     * @param array $value
+     * @return string
+     */
+    private function parseTable(array $lines, array $value)
+    {
+        list ($head, $aligns) = $value;
+        $ignore = $head ? 1 : 0;
+
+        $html = '<table>';
+        $body = NULL;
+
+        foreach ($lines as $key => $line) {
+            if ($key == $ignore) {
+                $head = false;
+                $body = true;
                 continue;
             }
-                
-            $levels[$count] = 0;
-            $map[] = [$count, $type, $line];
-        }
 
-        // blance level
-        $levels = array_keys($levels);
-        sort($levels);
-        $levels = array_map(function ($level) {
-            return $level + 1;
-        }, array_flip($levels));
-        
-        // place temp tag
-        foreach ($map as $key => $item) {
-            list ($count, $type, $line) = $item;
-            $level = $levels[$count];
-
-            $lastLevel = 0;
-            $lastType = $type;
-            $nextLevel = 0;
-            $nextType = $type;
-
-            if (isset($map[$key - 1])) {
-                $lastLevel = $levels[$map[$key - 1][0]];
-                $lastType = $map[$key - 1][1];
-            }
-
-            if (isset($map[$key + 1])) {
-                $nextLevel = $levels[$map[$key + 1][0]];
-                $nextType = $map[$key + 1][1];
-            }
-            
-            $line = is_array($line) ? $this->parse(implode("\n", $line)) : $this->parseInline($line);
-
-            for ($i = 0; $i < $level - $lastLevel - 1; $i ++) {
-                $html .= ($i + $lastLevel > 1 ? '<li>' : '') . '<xl>';
-            }
-
-            $html .= str_repeat("<xl>", max(0, $level - $lastLevel - 1)) 
-                . ($level > 1 ? '<li>' : '')
-                . ($level > $lastLevel || ($level == $lastLevel && $type != $lastType) ? "<{$type}>" : '')
-                . "<li>{$line}</li>" 
-                . ($level > $nextLevel || ($level == $lastLevel && $type != $nextType) ? "</{$type}>" : '')
-                . ($level > 1 ? '</li>' : '');
-
-            for ($i = $level - $nextLevel - 1; $i > 0; $i --) {
-                $html .= '</xl>' . ($i + $nextLevel > 1 ? '</li>' : '');
-            }
-        }
-
-        // find close tag
-        $stack = [];
-        $lastTag = '';
-
-        while (preg_match("/<\/(ul|ol|xl)>/", $html, $matches, PREG_OFFSET_CAPTURE)) {
-            $sub = substr($html, 0, $matches[0][1]);
-
-            $pos = max(strrpos($sub, '<ul>'),
-                strrpos($sub, '<ol>'),
-                strrpos($sub, '<xl>'));
-
-            $tag = substr($sub, $pos + 1, 2);
-
-            if ($matches[1][0] != 'xl' && $tag == 'xl') {
-                $html = substr_replace($html, $matches[1][0], $pos + 1, 2);
-                $lastTag = $matches[1][0];
-            } else if ($matches[1][0] == 'xl' && $tag != 'xl') {
-                $html = substr_replace($html, $tag, $matches[1][1], 2);
-                $lastTag = $tag;
-            } else if ($matches[1][0] == 'xl' && $tag == 'xl') {
-                $lastTag = empty($lastTag) ? 'ul' : $lastTag;
-                $html = substr_replace($html, $lastTag, $pos + 1, 2);
-                $html = substr_replace($html, $lastTag, $matches[1][1], 2);
-            } else {
-                $lastTag = $tag;
-            }
-
-            $id = '|' . $uniqid . count($stack) . '|';
-            $stack[$id] = substr($html, $pos, $matches[1][1] - $pos + 4 - 1);
-            $html = substr_replace($html, $id, $pos, $matches[1][1] - $pos + 4 - 1);
-        }
-
-        do {
-            $found = false;
-            foreach ($stack as $key => $val) {
-                $html = str_replace($key, $val, $html, $count);
-                if ($count > 0) {
-                    $found = true;
+            if ($line[0] == '|') {
+                $line = substr($line, 1);
+                if ($line[strlen($line) - 1] == '|') {
+                    $line = substr($line, 0, -1);
                 }
             }
-        } while ($found);
 
+            $line = preg_replace("/^(\|?)(.*?)\\1$/", "\\2", $line);
+            $rows = array_map('trim', explode('|', $line));
+            $columns = [];
+            $last = -1;
+
+            foreach ($rows as $row) {
+                if (strlen($row) > 0) {
+                    $last ++;
+                    $columns[$last] = [1, $row];
+                } else if (isset($columns[$last])) {
+                    $columns[$last][0] ++;
+                }
+            }
+
+            if ($head) {
+                $html .= '<thead>';
+            } else if ($body) {
+                $html .= '<tbody>';
+            }
+
+            $html .= '<tr>';
+
+            foreach ($columns as $key => $column) {
+                list ($num, $text) = $column;
+                $tag = $head ? 'th' : 'td';
+
+                $html .= "<{$tag}";
+                if ($num > 1) {
+                    $html .= " colspan=\"{$num}\"";
+                }
+
+                if (isset($aligns[$key]) && $aligns[$key] != 'none') {
+                    $html .= " align=\"{$aligns[$key]}\"";
+                }
+
+                $html .= '>' . $this->parseInline($text) . "</{$tag}>";
+            }
+
+            $html .= '</tr>';
+
+            if ($head) {
+                $html .= '</thead>';
+            } else if ($body) {
+                $body = false;
+            }
+        }
+
+        if ($body !== NULL) {
+            $html .= '</tbody>';
+        }
+
+        $html .= '</table>';
         return $html;
     }
 
@@ -678,7 +851,7 @@ class Parser
         $str = preg_replace("/(\n\s*){2,}/", "</p><p>", $str);
         $str = preg_replace("/\n/", "<br>", $str);
 
-        return empty($str) ? '' : "<p>{$str}</p>";
+        return preg_match("/^\s*$/", $str) ? '' : "<p>{$str}</p>";
     }
 
     /**
@@ -706,7 +879,7 @@ class Parser
      * 
      * @return string
      */
-    private function parseDefine()
+    private function parseDefinition()
     {
         return '';
     }
@@ -726,6 +899,15 @@ class Parser
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * @param $str
+     * @return mixed
+     */
+    private function escapeBracket($str)
+    {
+        return str_replace(['\[', '\]', '\(', '\)'], ['[', ']', '(', ')'], $str);
     }
 
     /**
@@ -810,6 +992,10 @@ class Parser
      */
     private function backBlock($step, $type, $value = NULL)
     {
+        if ($this->_pos < 0) {
+            return $this->startBlock($type, 0, $value);
+        }
+
         $last = $this->_blocks[$this->_pos][2];
         $this->_blocks[$this->_pos][2] = $last - $step;
 
